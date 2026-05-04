@@ -13,7 +13,6 @@ function buildSearchUrl() {
     status: process.env.STATUS || '0',
     years: process.env.YEARS || '2',
   });
-
   return `/api/v1/job_search?${params.toString()}`;
 }
 
@@ -28,23 +27,32 @@ function saveApplied(applied) {
 
 (async () => {
   const browser = await chromium.launch({ headless: false });
-  const page = await browser.newPage();
+  const context = await browser.newContext();
+  const page = await context.newPage();
 
-  // 🔐 Login
-  await page.goto('https://www.instahyre.com/login');
+  await context.clearCookies();
+
+  // Login
+  await page.goto('https://www.instahyre.com/login', { waitUntil: 'domcontentloaded' });
   await page.fill('input[name="email"]', process.env.EMAIL);
   await page.fill('input[name="password"]', process.env.PASSWORD);
-  await page.click('button[type="submit"]');
 
-  // Stable wait (don’t use waitForURL)
-  await page.waitForSelector('text=Opportunities', { timeout: 20000 });
+  await Promise.all([
+    page.click('button[type="submit"]'),
+    page.waitForLoadState('networkidle')
+  ]);
+
+  await page.goto('https://www.instahyre.com/candidate/opportunities/', {
+    waitUntil: 'domcontentloaded'
+  });
+
+  await page.waitForTimeout(4000);
   console.log("✅ Logged in");
 
-  // 🔎 Build dynamic API URL
+  // Fetch jobs
   const apiUrl = buildSearchUrl();
   console.log("🔎 Using API:", apiUrl);
 
-  // 📥 Fetch jobs
   const jobs = await page.evaluate(async (url) => {
     const res = await fetch(url, {
       headers: { "accept": "application/json" },
@@ -53,7 +61,6 @@ function saveApplied(applied) {
     return res.json();
   }, apiUrl);
 
-  // 🧠 Normalize Instahyre’s inconsistent response
   const jobList =
     jobs.objects ||
     jobs.results ||
@@ -66,10 +73,10 @@ function saveApplied(applied) {
 
   const applied = loadApplied();
 
-  // 🚀 Apply loop
+  // Apply loop
   for (const job of jobList) {
     if (applied.includes(job.id)) {
-      console.log("⏭️ Already applied:", job.title);
+      console.log("⏭️ Skipped (already handled):", job.title);
       continue;
     }
 
@@ -103,12 +110,16 @@ function saveApplied(applied) {
       return res.json();
     }, job.id);
 
-    console.log("✅", result.message);
+    // ✅ Correct handling
+    if (result.success || result.message?.toLowerCase().includes("already")) {
+      console.log(`✅ Applied/Already: ${job.title}`);
+      applied.push(job.id);
+      saveApplied(applied);
+    } else {
+      console.log(`❌ Failed: ${job.title}`, result);
+    }
 
-    applied.push(job.id);
-    saveApplied(applied);
-
-    await page.waitForTimeout(2000); // human-like delay
+    await page.waitForTimeout(2000);
   }
 
   console.log("🎉 Done applying!");
